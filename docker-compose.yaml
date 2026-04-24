@@ -1,0 +1,19 @@
+services:
+  frontend:
+    image: ghcr.io/kevinjustin1243/timeblock-front:latest
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    image: ghcr.io/kevinjustin1243/timeblock-back:latest
+    expose:
+      - "8000"
+    environment:
+      - HOME=/root
+    volumes:
+      # config.yaml + timeblock.db both live at ~/.config/timeblock/ inside the container.
+      - ${TIMEBLOCK_CONFIG_DIR:-./config}:/root/.config/timeblock
+    restart: unless-stopped
