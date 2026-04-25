@@ -10,8 +10,8 @@ router = APIRouter(prefix="/api/events", tags=["events"])
 
 class EventIn(BaseModel):
     date: str
-    start_hour: int
-    end_hour: int
+    start_min: int
+    end_min: int
     title: str
     color: str
 
@@ -20,8 +20,8 @@ def _row_to_dict(row) -> dict:
     return {
         "id": row["id"],
         "date": row["date"],
-        "startHour": row["start_hour"],
-        "endHour": row["end_hour"],
+        "startMin": row["start_min"],
+        "endMin": row["end_min"],
         "title": row["title"],
         "color": row["color"],
     }
@@ -31,8 +31,8 @@ def _row_to_dict(row) -> dict:
 def list_events(username: str = Depends(require_user)):
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, date, start_hour, end_hour, title, color FROM events"
-            " WHERE user = ? ORDER BY date, start_hour",
+            "SELECT id, date, start_min, end_min, title, color FROM events"
+            " WHERE user = ? ORDER BY date, start_min",
             (username,),
         ).fetchall()
     return [_row_to_dict(r) for r in rows]
@@ -43,16 +43,16 @@ def create_event(body: EventIn, username: str = Depends(require_user)):
     event_id = str(uuid.uuid4())
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO events (id, user, date, start_hour, end_hour, title, color)"
+            "INSERT INTO events (id, user, date, start_min, end_min, title, color)"
             " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (event_id, username, body.date, body.start_hour, body.end_hour, body.title, body.color),
+            (event_id, username, body.date, body.start_min, body.end_min, body.title, body.color),
         )
         conn.commit()
     return {
         "id": event_id,
         "date": body.date,
-        "startHour": body.start_hour,
-        "endHour": body.end_hour,
+        "startMin": body.start_min,
+        "endMin": body.end_min,
         "title": body.title,
         "color": body.color,
     }
@@ -67,8 +67,8 @@ def update_event(event_id: str, body: EventIn, username: str = Depends(require_u
         if not row:
             raise HTTPException(status_code=404, detail="Event not found")
         conn.execute(
-            "UPDATE events SET date = ?, start_hour = ?, end_hour = ?, title = ?, color = ? WHERE id = ?",
-            (body.date, body.start_hour, body.end_hour, body.title, body.color, event_id),
+            "UPDATE events SET date = ?, start_min = ?, end_min = ?, title = ?, color = ? WHERE id = ?",
+            (body.date, body.start_min, body.end_min, body.title, body.color, event_id),
         )
         conn.commit()
     return {"ok": True}

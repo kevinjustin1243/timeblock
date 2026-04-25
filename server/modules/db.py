@@ -18,11 +18,33 @@ def init_db() -> None:
                 id         TEXT PRIMARY KEY,
                 user       TEXT NOT NULL,
                 date       TEXT NOT NULL,
-                start_hour INTEGER NOT NULL,
-                end_hour   INTEGER NOT NULL,
+                start_min  INTEGER NOT NULL,
+                end_min    INTEGER NOT NULL,
                 title      TEXT NOT NULL,
                 color      TEXT NOT NULL DEFAULT '#60a5fa',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Migrate from hour-based schema if needed
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
+        if "start_hour" in cols and "start_min" not in cols:
+            conn.execute("""
+                CREATE TABLE events_new (
+                    id         TEXT PRIMARY KEY,
+                    user       TEXT NOT NULL,
+                    date       TEXT NOT NULL,
+                    start_min  INTEGER NOT NULL,
+                    end_min    INTEGER NOT NULL,
+                    title      TEXT NOT NULL,
+                    color      TEXT NOT NULL DEFAULT '#60a5fa',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                INSERT INTO events_new (id, user, date, start_min, end_min, title, color, created_at)
+                SELECT id, user, date, start_hour * 60, end_hour * 60, title, color, created_at
+                FROM events
+            """)
+            conn.execute("DROP TABLE events")
+            conn.execute("ALTER TABLE events_new RENAME TO events")
         conn.commit()

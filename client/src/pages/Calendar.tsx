@@ -2,7 +2,9 @@ import { useState, useRef, useEffect } from "react";
 import { XMarkIcon, TrashIcon } from "../components/icons";
 import { apiFetch } from "../lib/api";
 
-const HOUR_HEIGHT = 56;
+const HOUR_HEIGHT = 60; // px per hour; 1 px = 1 minute
+const SNAP = 5; // minutes
+const MIN_DURATION = 15; // minimum block size in minutes
 const COLORS = [
   "#60a5fa", "#34d399", "#a78bfa", "#f87171", "#fbbf24",
   "#2dd4bf", "#818cf8", "#f472b6", "#fb923c", "#94a3b8",
@@ -12,8 +14,8 @@ const DOW = ["S", "M", "T", "W", "T", "F", "S"];
 interface TimeBlock {
   id: string;
   date: string;
-  startHour: number;
-  endHour: number;
+  startMin: number;
+  endMin: number;
   title: string;
   color: string;
 }
@@ -22,10 +24,36 @@ function dateKey(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+function snapTo(min: number) {
+  return Math.round(min / SNAP) * SNAP;
+}
+
+function clamp(v: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function formatMin(min: number) {
+  if (min >= 24 * 60) return "midnight";
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  const period = h < 12 ? "am" : "pm";
+  const dh = h === 0 ? 12 : h > 12 ? h - 12 : h;
+  return m === 0 ? `${dh} ${period}` : `${dh}:${String(m).padStart(2, "0")} ${period}`;
+}
+
 function formatHour(h: number) {
   if (h === 0) return "12 am";
   if (h === 12) return "12 pm";
   return h < 12 ? `${h} am` : `${h - 12} pm`;
+}
+
+function minToTimeValue(min: number) {
+  return `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+}
+
+function timeValueToMin(val: string): number | null {
+  const [h, m] = val.split(":").map(Number);
+  return isNaN(h) || isNaN(m) ? null : h * 60 + m;
 }
 
 function formatDate(d: Date) {
@@ -38,7 +66,7 @@ function groupByDate(blocks: TimeBlock[]): Record<string, TimeBlock[]> {
     (out[b.date] ??= []).push(b);
   }
   for (const key of Object.keys(out)) {
-    out[key].sort((a, b) => a.startHour - b.startHour);
+    out[key].sort((a, b) => a.startMin - b.startMin);
   }
   return out;
 }
@@ -50,14 +78,18 @@ export default function Calendar() {
   const [blocks, setBlocks] = useState<Record<string, TimeBlock[]>>({});
   const [loading, setLoading] = useState(true);
   const [drag, setDrag] = useState<{ start: number; end: number } | null>(null);
-  const [pending, setPending] = useState<{ startHour: number; endHour: number } | null>(null);
+  const [pending, setPending] = useState<{ startMin: number; endMin: number } | null>(null);
   const [editing, setEditing] = useState<TimeBlock | null>(null);
+  const [liveBlock, setLiveBlock] = useState<TimeBlock | null>(null);
   const [pendingTitle, setPendingTitle] = useState("");
   const [pendingColor, setPendingColor] = useState(COLORS[0]);
 
   const isDragging = useRef(false);
   const dragAnchor = useRef(0);
   const dragRef = useRef<{ start: number; end: number } | null>(null);
+  const isResizing = useRef(false);
+  const resizeBlockRef = useRef<TimeBlock | null>(null);
+  const resizeEdge = useRef<"start" | "end">("end");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -74,33 +106,99 @@ export default function Calendar() {
   }, [selected]);
 
   useEffect(() => {
-    function onMouseUp() {
-      if (!isDragging.current) return;
-      isDragging.current = false;
-      const d = dragRef.current;
-      dragRef.current = null;
-      setDrag(null);
-      if (d) setPending({ startHour: d.start, endHour: d.end });
+    function getMin(e: MouseEvent): number {
+      const el = scrollRef.current;
+      if (!el) return 0;
+      const rect = el.getBoundingClientRect();
+      const y = e.clientY - rect.top + el.scrollTop;
+      return clamp(snapTo(y / HOUR_HEIGHT * 60), 0, 24 * 60);
     }
+
+    function onMouseMove(e: MouseEvent) {
+      if (!isDragging.current && !isResizing.current) return;
+      const min = getMin(e);
+
+      if (isDragging.current) {
+        const anchor = dragAnchor.current;
+        const start = Math.min(anchor, min);
+        const end = Math.max(anchor, min);
+        const d = { start, end: Math.max(end, start + SNAP) };
+        dragRef.current = d;
+        setDrag(d);
+      } else if (isResizing.current && resizeBlockRef.current) {
+        const block = resizeBlockRef.current;
+        let updated: TimeBlock;
+        if (resizeEdge.current === "end") {
+          updated = { ...block, endMin: Math.max(block.startMin + MIN_DURATION, min) };
+        } else {
+          updated = { ...block, startMin: Math.min(block.endMin - MIN_DURATION, min) };
+        }
+        resizeBlockRef.current = updated;
+        setLiveBlock(updated);
+      }
+    }
+
+    function onMouseUp() {
+      document.body.style.cursor = "";
+      if (isDragging.current) {
+        isDragging.current = false;
+        const d = dragRef.current;
+        dragRef.current = null;
+        setDrag(null);
+        if (d && d.end > d.start) setPending({ startMin: d.start, endMin: d.end });
+      } else if (isResizing.current) {
+        isResizing.current = false;
+        const block = resizeBlockRef.current;
+        resizeBlockRef.current = null;
+        setLiveBlock(null);
+        if (block) {
+          setBlocks(prev => ({
+            ...prev,
+            [block.date]: (prev[block.date] ?? []).map(b => b.id === block.id ? block : b),
+          }));
+          apiFetch(`/api/events/${block.id}`, {
+            method: "PUT",
+            body: JSON.stringify({
+              date: block.date,
+              start_min: block.startMin,
+              end_min: block.endMin,
+              title: block.title,
+              color: block.color,
+            }),
+          });
+        }
+      }
+    }
+
+    window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("mouseup", onMouseUp);
-    return () => window.removeEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+      document.body.style.cursor = "";
+    };
   }, []);
 
-  function startDrag(hour: number) {
+  function handleGridMouseDown(e: React.MouseEvent<HTMLDivElement>) {
+    const el = scrollRef.current!;
+    const rect = el.getBoundingClientRect();
+    const y = e.clientY - rect.top + el.scrollTop;
+    const min = clamp(snapTo(y / HOUR_HEIGHT * 60), 0, 24 * 60 - SNAP);
     isDragging.current = true;
-    dragAnchor.current = hour;
-    const d = { start: hour, end: hour + 1 };
+    dragAnchor.current = min;
+    const d = { start: min, end: min + SNAP };
     dragRef.current = d;
     setDrag(d);
+    document.body.style.cursor = "crosshair";
   }
 
-  function moveDrag(hour: number) {
-    if (!isDragging.current) return;
-    const start = Math.min(dragAnchor.current, hour);
-    const end = Math.max(dragAnchor.current, hour) + 1;
-    const d = { start, end };
-    dragRef.current = d;
-    setDrag(d);
+  function startResize(block: TimeBlock, edge: "start" | "end", e: React.MouseEvent) {
+    e.stopPropagation();
+    e.preventDefault();
+    isResizing.current = true;
+    resizeBlockRef.current = { ...block };
+    resizeEdge.current = edge;
+    document.body.style.cursor = edge === "end" ? "s-resize" : "n-resize";
   }
 
   async function saveBlock() {
@@ -109,8 +207,8 @@ export default function Calendar() {
       method: "POST",
       body: JSON.stringify({
         date: dateKey(selected),
-        start_hour: pending.startHour,
-        end_hour: pending.endHour,
+        start_min: pending.startMin,
+        end_min: pending.endMin,
         title: pendingTitle.trim() || "Untitled",
         color: pendingColor,
       }),
@@ -118,7 +216,7 @@ export default function Calendar() {
     const block: TimeBlock = await r.json();
     setBlocks(prev => ({
       ...prev,
-      [block.date]: [...(prev[block.date] ?? []), block].sort((a, b) => a.startHour - b.startHour),
+      [block.date]: [...(prev[block.date] ?? []), block].sort((a, b) => a.startMin - b.startMin),
     }));
     setPending(null);
     setPendingTitle("");
@@ -131,8 +229,8 @@ export default function Calendar() {
       method: "PUT",
       body: JSON.stringify({
         date: editing.date,
-        start_hour: editing.startHour,
-        end_hour: editing.endHour,
+        start_min: editing.startMin,
+        end_min: editing.endMin,
         title: editing.title,
         color: editing.color,
       }),
@@ -221,62 +319,84 @@ export default function Calendar() {
       <div className="flex-1 flex flex-col overflow-hidden">
         <div className="px-6 py-3 border-b border-slate-200 shrink-0">
           <p className="text-sm font-semibold text-slate-800">{formatDate(selected)}</p>
-          <p className="text-xs text-slate-400 mt-0.5">Drag to create a block · click a block to edit</p>
+          <p className="text-xs text-slate-400 mt-0.5">Drag to create · drag edges to resize · click to edit</p>
         </div>
 
         {loading ? (
           <div className="flex-1 flex items-center justify-center text-sm text-slate-400">Loading…</div>
         ) : (
           <div ref={scrollRef} className="flex-1 overflow-y-auto">
-            <div className="relative" style={{ height: 24 * HOUR_HEIGHT }}>
+            <div
+              className="relative cursor-crosshair"
+              style={{ height: 24 * HOUR_HEIGHT }}
+              onMouseDown={handleGridMouseDown}
+            >
+              {/* Hour lines and labels */}
               {Array.from({ length: 24 }, (_, h) => (
                 <div
                   key={h}
-                  className="absolute w-full flex"
+                  className="absolute w-full flex pointer-events-none"
                   style={{ top: h * HOUR_HEIGHT, height: HOUR_HEIGHT }}
-                  onMouseDown={() => startDrag(h)}
-                  onMouseEnter={() => moveDrag(h)}
                 >
-                  <div className="w-16 shrink-0 pr-3 flex items-start justify-end pointer-events-none">
+                  <div className="w-16 shrink-0 pr-3 flex items-start justify-end">
                     <span className="text-[11px] text-slate-400 -mt-2">{formatHour(h)}</span>
                   </div>
                   <div
-                    className={`flex-1 border-t cursor-crosshair transition-colors ${
-                      drag && h >= drag.start && h < drag.end
+                    className={`flex-1 border-t ${
+                      drag && h * 60 < drag.end && (h + 1) * 60 > drag.start
                         ? "bg-blue-50 border-slate-200"
-                        : "border-slate-100 hover:bg-slate-50/60"
+                        : "border-slate-100"
                     }`}
                   />
                 </div>
               ))}
 
-              {dayBlocks.map(block => (
-                <button
-                  key={block.id}
-                  className="absolute rounded-lg px-2.5 py-1.5 text-left text-white text-xs shadow-sm z-10 overflow-hidden hover:brightness-110 active:brightness-95 transition-all"
-                  style={{
-                    top: block.startHour * HOUR_HEIGHT + 2,
-                    height: (block.endHour - block.startHour) * HOUR_HEIGHT - 4,
-                    left: 68,
-                    right: 16,
-                    backgroundColor: block.color,
-                  }}
-                  onMouseDown={e => e.stopPropagation()}
-                  onClick={() => setEditing({ ...block })}
-                >
-                  <div className="font-semibold leading-tight truncate">{block.title}</div>
-                  <div className="text-white/75 text-[10px] mt-0.5">
-                    {formatHour(block.startHour)} – {formatHour(block.endHour)}
+              {/* Blocks */}
+              {dayBlocks.map(block => {
+                const b = liveBlock?.id === block.id ? liveBlock : block;
+                const top = b.startMin + 1;
+                const height = Math.max(20, b.endMin - b.startMin - 2);
+                const showTime = b.endMin - b.startMin >= 20;
+                return (
+                  <div
+                    key={b.id}
+                    className="absolute rounded-lg text-white text-xs shadow-sm z-10 overflow-hidden"
+                    style={{ top, height, left: 68, right: 16, backgroundColor: b.color }}
+                    onMouseDown={e => e.stopPropagation()}
+                  >
+                    {/* Top resize handle */}
+                    <div
+                      className="absolute top-0 left-0 right-0 h-2 cursor-n-resize z-20"
+                      onMouseDown={e => startResize(block, "start", e)}
+                    />
+                    {/* Clickable content */}
+                    <button
+                      className="absolute inset-0 top-2 bottom-2 px-2.5 py-1 text-left w-full hover:brightness-110 active:brightness-95"
+                      onClick={() => setEditing({ ...b })}
+                    >
+                      <div className="font-semibold leading-tight truncate">{b.title}</div>
+                      {showTime && (
+                        <div className="text-white/75 text-[10px] mt-0.5">
+                          {formatMin(b.startMin)} – {formatMin(b.endMin)}
+                        </div>
+                      )}
+                    </button>
+                    {/* Bottom resize handle */}
+                    <div
+                      className="absolute bottom-0 left-0 right-0 h-2 cursor-s-resize z-20"
+                      onMouseDown={e => startResize(block, "end", e)}
+                    />
                   </div>
-                </button>
-              ))}
+                );
+              })}
 
+              {/* Drag preview */}
               {drag && (
                 <div
                   className="absolute rounded-lg pointer-events-none z-20 border-2 border-blue-400 bg-blue-400/20"
                   style={{
-                    top: drag.start * HOUR_HEIGHT + 2,
-                    height: (drag.end - drag.start) * HOUR_HEIGHT - 4,
+                    top: drag.start + 1,
+                    height: Math.max(4, drag.end - drag.start - 2),
                     left: 68,
                     right: 16,
                   }}
@@ -294,15 +414,40 @@ export default function Calendar() {
           onMouseDown={() => setPending(null)}
         >
           <div className="bg-white rounded-2xl shadow-2xl p-6 w-80" onMouseDown={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-1">
+            <div className="flex items-center justify-between mb-4">
               <h3 className="font-semibold text-slate-800 text-sm">New time block</h3>
               <button onClick={() => setPending(null)} className="text-slate-400 hover:text-slate-600">
                 <XMarkIcon className="w-4 h-4" />
               </button>
             </div>
-            <p className="text-xs text-slate-400 mb-4">
-              {formatHour(pending.startHour)} – {formatHour(pending.endHour)}
-            </p>
+            <div className="flex gap-3 mb-4">
+              <div className="flex-1">
+                <label className="text-xs text-slate-500 mb-1 block">Start</label>
+                <input
+                  type="time"
+                  step="300"
+                  value={minToTimeValue(pending.startMin)}
+                  onChange={e => {
+                    const m = timeValueToMin(e.target.value);
+                    if (m !== null) setPending({ ...pending, startMin: m });
+                  }}
+                  className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
+              </div>
+              <div className="flex-1">
+                <label className="text-xs text-slate-500 mb-1 block">End</label>
+                <input
+                  type="time"
+                  step="300"
+                  value={minToTimeValue(pending.endMin)}
+                  onChange={e => {
+                    const m = timeValueToMin(e.target.value);
+                    if (m !== null) setPending({ ...pending, endMin: m });
+                  }}
+                  className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
+              </div>
+            </div>
             <input
               autoFocus
               type="text"
@@ -342,15 +487,40 @@ export default function Calendar() {
           onMouseDown={() => setEditing(null)}
         >
           <div className="bg-white rounded-2xl shadow-2xl p-6 w-80" onMouseDown={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-1">
+            <div className="flex items-center justify-between mb-4">
               <h3 className="font-semibold text-slate-800 text-sm">Edit time block</h3>
               <button onClick={() => setEditing(null)} className="text-slate-400 hover:text-slate-600">
                 <XMarkIcon className="w-4 h-4" />
               </button>
             </div>
-            <p className="text-xs text-slate-400 mb-4">
-              {formatHour(editing.startHour)} – {formatHour(editing.endHour)}
-            </p>
+            <div className="flex gap-3 mb-4">
+              <div className="flex-1">
+                <label className="text-xs text-slate-500 mb-1 block">Start</label>
+                <input
+                  type="time"
+                  step="300"
+                  value={minToTimeValue(editing.startMin)}
+                  onChange={e => {
+                    const m = timeValueToMin(e.target.value);
+                    if (m !== null) setEditing({ ...editing, startMin: m });
+                  }}
+                  className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
+              </div>
+              <div className="flex-1">
+                <label className="text-xs text-slate-500 mb-1 block">End</label>
+                <input
+                  type="time"
+                  step="300"
+                  value={minToTimeValue(editing.endMin)}
+                  onChange={e => {
+                    const m = timeValueToMin(e.target.value);
+                    if (m !== null) setEditing({ ...editing, endMin: m });
+                  }}
+                  className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
+              </div>
+            </div>
             <input
               autoFocus
               type="text"
